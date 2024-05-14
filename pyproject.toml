@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "mlinoe"
+version = "0.1.0"
+description = "mlinoe (machine learning in observables explanation is a python package that provides a framework to compare a collection of physical models and select the model that is more likely to reproduce the experimental constraints."
+authors = ["Jorge Alda <jorge.alda@pd.infn.it>", "Hector Gisbert <hector.gisbert@pd.infn.it>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
