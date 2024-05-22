@@ -3,39 +3,67 @@ import multiprocessing as mp
 import yaml
 import xgboost
 import sklearn
+import pyarrow as pa
+from pyarrow import parquet, dataset
 import yaml
 import pandas as pd
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
+import pathlib
 
 class Model:
     def __init__(self, name: str, parameters: list[str], observables: list[str], fun: Callable[[dict[str, float|complex]], dict[str, float]]):
         self.name = name
-        self.parameters = set(parameters)
-        self.observables = set(observables)
+        self.parameters = parameters
+        self.observables = observables
         self.fun = fun
 
     def __call__(self, parameters: dict[str, float|complex]) -> dict[str, float]:
-        if len(self.parameters - set(parameters.keys())) != 0:
+        if len(set(self.parameters) - set(parameters.keys())) != 0:
             raise KeyError("Missing parameters")
-        if len(set(parameters.keys()) - self.parameters) != 0:
+        if len(set(parameters.keys()) - set(self.parameters)) != 0:
             raise KeyError("Unknown parameters")
         res = self.fun(parameters)
-        if len(self.observables - set(res.keys())) != 0:
+        if len(set(self.observables) - set(res.keys())) != 0:
             raise KeyError("Missing observables")
-        if len(set(res.keys()) - self.observables) != 0:
+        if len(set(res.keys()) - set(self.observables)) != 0:
             raise KeyError("Unknown observables")
         return res
 
     def batch(self, pars: list[dict[str, float|complex]], cores: int=1) -> list[dict]:
         if cores == 1:
-            return [{'model': self.name, 'pars': p, 'obs': o} for p, o in zip(pars, map(self.__call__, pars))]
+            return [{'model': self.name} | o | p for p, o in zip(pars, map(self.__call__, pars))]
         else:
             with mp.Pool(cores) as pool:
                 res = pool.map(self.__call__, pars)
-            return [{'model': self.name, 'pars': p, 'obs': o} for p, o in zip(pars, res)]
+            return [{'model': self.name} | o | p for p, o in zip(pars, res)]
 
-    def batch_yaml(self, pars: list[dict[str, float|complex]], stream, cores: int=1):
-        yaml.safe_dump(self.batch(pars, cores), stream)
+    def batch_save(self, pars: list[dict[str, float|complex]], path, cores: int=1):
+        headers = [pa.field("model", pa.string())] + [pa.field(o, pa.float32(), metadata={'type': 'observable'}) for o in self.observables] + [pa.field(p, pa.float32(), metadata={'type': 'parameter'}) for p in self.parameters]
+        sanitized = self.name.replace("\\", "").replace(r'{', '').replace(r'}', '')
+        schema = pa.schema(headers)
+        df = pd.DataFrame(self.batch(pars, cores))
+        table = pa.Table.from_pandas(df, preserve_index=False).cast(schema)
+        parquet.write_table(table, f'{path}/{sanitized}.parquet')
+        model_file = pathlib.Path(path)/ "_models.yaml"
+        if model_file.is_file():
+            with open(model_file, 'rt') as f:
+                model_dict = dict(yaml.safe_load(f))
+        else:
+            model_dict = {}
+        model_dict |= {self.name: self.parameters}
+        with open(model_file, 'wt') as f:
+                yaml.safe_dump(model_dict, f)
+        obs_file = pathlib.Path(path)/ "_observables.yaml"
+        if obs_file.is_file():
+            with open(obs_file, 'rt') as f:
+                obs_list = list(yaml.safe_load(f))
+        else:
+            obs_list = []
+        obs_list = list(set(obs_list) | set(self.observables))
+        with open(obs_file, 'wt') as f:
+            yaml.safe_dump(obs_list, f)
+
+
 
 class Classifier:
     def __init__(self, data: pd.DataFrame, y_keyword: str ='model', model_pars={}):
@@ -51,13 +79,10 @@ class Classifier:
         self.model = None
 
     @classmethod
-    def from_files(cls, inputs: list[str], model_pars={}):
-        data = []
-        for inp in inputs:
-            with open(inp, 'rt') as f:
-                m1 = yaml.safe_load(f)
-            data += [dict(v['obs']) | {'model': v['model']} for v in m1]
-        return cls(pd.DataFrame(data), model_pars=model_pars)
+    def from_dataset(cls, path: str, model_pars={}):
+        with open(pathlib.Path(path)/"_observables.yaml", 'rt') as f:
+            obs_list = list(yaml.safe_load(f))
+        return cls(dataset.dataset(path).to_table(columns = ['model'] + obs_list).to_pandas(), model_pars=model_pars)
 
     def train(self, test_split: float=0.3):
         self.train_df, self.valid_df = sklearn.model_selection.train_test_split(self.data, test_size=int(test_split*len(self.data)))
