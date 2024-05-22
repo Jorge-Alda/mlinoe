@@ -110,3 +110,57 @@ class XClassifier(Classifier):
     def __init__(self, data: pd.DataFrame, y_keyword: str='model', model_pars={}):
         super().__init__(data, y_keyword, model_pars)
         self.model = xgboost.XGBRFClassifier(objective='multi:softprob', **model_pars)
+
+
+class LikelihoodRegressor:
+    def __init__(self, data: pd.DataFrame, y_keyword: str ='model', model_pars={}):
+        self.obsdict = {data.columns[i]: f'obs_{i}' for i in range(len(data.columns)) if data.columns[i] != y_keyword}
+        self.data = data.rename(columns=self.obsdict)
+        self.y_keyword = y_keyword
+        self.trained = False
+        self.features = [c for c in self.data.columns if c != self.y_keyword]
+        self.data = pd.get_dummies(self.data, columns=[self.y_keyword], dtype=float)
+        self.dummies = list(set(self.data.columns)-set(self.features))
+        self.labels = [d[len(self.y_keyword)+1:] for d in self.dummies]
+        self.model = None
+
+    @classmethod
+    def from_dataset(cls, path: str, model_pars={}):
+        with open(pathlib.Path(path)/"_observables.yaml", 'rt') as f:
+            obs_list = list(yaml.safe_load(f))
+        return cls(dataset.dataset(path).to_table(columns = ['model'] + obs_list).to_pandas(), model_pars=model_pars)
+
+    def train(self, test_split: float=0.3):
+        self.train_df, self.valid_df = sklearn.model_selection.train_test_split(self.data, test_size=int(test_split*len(self.data)))
+        self.model.fit(self.train_df[self.features], self.train_df[self.dummies])
+        self.trained = True
+        self.y_pred = self.model.predict(self.valid_df[self.features])
+
+    def report(self):
+        if self.trained:
+            y_class = [[float(y0 == max(y)) for y0 in y] for y in self.y_pred]
+            print(sklearn.metrics.classification_report(pd.from_dummies(self.valid_df[self.dummies]), pd.from_dummies(pd.DataFrame(y_class, columns=self.dummies)), labels=self.dummies, target_names=self.labels))
+
+    def confusion(self):
+        if self.trained:
+            y_class = [[float(y0 == max(y)) for y0 in y] for y in self.y_pred]
+            plt.matshow(sklearn.metrics.confusion_matrix(pd.from_dummies(self.valid_df[self.dummies]), pd.from_dummies(pd.DataFrame(y_class, columns=self.dummies))))
+            plt.xticks(range(len(self.labels)), [f'${l}$' for l in self.labels], fontsize=16)
+            plt.yticks(range(len(self.labels)), [f'${l}$' for l in self.labels], fontsize=16)
+            plt.colorbar()
+
+    def predict(self, point: dict[str, float]):
+        p = [point[k] for k in self.obsdict.keys()]
+        if self.trained:
+            return self.model.predict([p,])[0]
+
+    def predict_proba(self, point: dict[str, float]):
+        p = [point[k] for k in self.obsdict.keys()]
+        if self.trained:
+            return self.model.predict([p,])[0]/sum(self.model.predict([p,])[0])
+
+class XLikelihoodRegressor(LikelihoodRegressor):
+    def __init__(self, data: pd.DataFrame, y_keyword: str='model', model_pars={}):
+        super().__init__(data, y_keyword, model_pars)
+        self.model = xgboost.XGBRegressor(objective='reg:logistic', **model_pars)
+
