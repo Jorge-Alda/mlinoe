@@ -10,18 +10,19 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import pathlib
 import warnings
+from random import random
 
 class Model:
-    def __init__(self, name: str, parameters: list[str], observables: list[str], fun: Callable[[dict[str, float|complex]], dict[str, float]]):
+    def __init__(self, name: str, parameters: dict[str, Callable], observables: list[str], fun: Callable[[dict[str, float|complex]], dict[str, float]]):
         self.name = name
         self.parameters = parameters
         self.observables = observables
         self.fun = fun
 
     def __call__(self, parameters: dict[str, float|complex]) -> dict[str, float]:
-        if len(set(self.parameters) - set(parameters.keys())) != 0:
+        if len(set(self.parameters.keys()) - set(parameters.keys())) != 0:
             raise KeyError("Missing parameters")
-        if len(set(parameters.keys()) - set(self.parameters)) != 0:
+        if len(set(parameters.keys()) - set(self.parameters.keys())) != 0:
             raise KeyError("Unknown parameters")
         res = self.fun(parameters)
         if len(set(self.observables) - set(res.keys())) != 0:
@@ -39,8 +40,8 @@ class Model:
             return [{'model': self.name} | o | p for p, o in zip(pars, res)]
 
     def batch_save(self, pars: list[dict[str, float|complex]], path, cores: int=1):
-        h = ['model',] + [o for o in self.observables] + [p for p in self.parameters]
-        headers = [pa.field("model", pa.string())] + [pa.field(o, pa.float32(), metadata={'type': 'observable'}) for o in self.observables] + [pa.field(p, pa.float32(), metadata={'type': 'parameter'}) for p in self.parameters]
+        h = ['model',] + [o for o in self.observables] + [p for p in self.parameters.keys()]
+        headers = [pa.field("model", pa.string())] + [pa.field(o, pa.float32(), metadata={'type': 'observable'}) for o in self.observables] + [pa.field(p, pa.float32(), metadata={'type': 'parameter'}) for p in self.parameters.keys()]
         sanitized = self.name.replace("\\", "").replace(r'{', '').replace(r'}', '')
         schema = pa.schema(headers)
         df = pd.DataFrame(self.batch(pars, cores))
@@ -52,7 +53,7 @@ class Model:
                 model_dict = dict(yaml.safe_load(f))
         else:
             model_dict = {}
-        model_dict |= {self.name: self.parameters}
+        model_dict |= {self.name: {k: str(v) for k, v in self.parameters.items()}}
         with open(model_file, 'wt') as f:
                 yaml.safe_dump(model_dict, f)
         obs_file = pathlib.Path(path)/ "_observables.yaml"
@@ -70,6 +71,16 @@ class Model:
         with open(obs_file, 'wt') as f:
             yaml.safe_dump(obs_list, f)
 
+    def random_point(self, *args):
+        return {p: pf(random()) for p, pf in self.parameters.items()}
+
+    def random_dataset(self, num, path, cores: int=1):
+        if cores == 1:
+            data = [self.random_point() for _ in range(num)]
+        else:
+            with mp.Pool(cores) as pool:
+                data = pool.map(self.random_point, range(num))
+        self.batch_save(data, path, cores)
 
 
 class Classifier:
